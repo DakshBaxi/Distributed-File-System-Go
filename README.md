@@ -1,116 +1,163 @@
-# DFS-Go
+DFS-Go — A Distributed File System in Go (Inspired by GFS/HDFS)
 
-A lightweight, educational distributed file system implemented in Go. Inspired by GFS/HDFS, DFS-Go demonstrates chunked storage, a NameNode metadata service, multiple DataNodes, replication, and simple HTTP-based APIs for learning distributed-systems concepts.
+DFS-Go is a lightweight, educational distributed file system built entirely in Go.
+It implements the core features of systems like Google File System (GFS) and Hadoop HDFS, including:
 
-## Features
+Chunked file storage
 
-- Chunk-based storage (default chunk size: 4 MiB)
-- Streaming upload/download (no full-buffer)
-- Replication for fault tolerance
-- NameNode: metadata, placement planning, heartbeat handling
-- DataNode: chunk storage, index, chunk serving, periodic heartbeats
-- Client-side failover (tries replicas when a node is down)
-- Persistent metadata on disk (JSON files)
-- Pure Go, standard library only, HTTP + JSON APIs
+NameNode metadata manager
 
-## Architecture (high-level)
+Multiple DataNodes for distributed storage
 
-NameNode
-- Tracks files → chunks → DataNode locations
-- Stores metadata (files.json, nodes.json)
-- Provides upload placement plans and receives heartbeats
+Replication for fault tolerance
 
-DataNode
-- Stores chunk files and maintains index
-- Serves chunk PUT/GET endpoints
-- Sends heartbeat with chunk inventory
+Heartbeats for node health & chunk inventory
 
-Client
-- Requests placement from NameNode
-- Uploads chunks to assigned DataNodes
-- Downloads by querying NameNode and contacting DataNodes
+Streaming uploads/downloads
 
-Simple ASCII flow:
-```
-Client <--> NameNode
-    |          ^
-    |          | (placement / metadata)
-    v          |
-DataNodes (store & serve chunks, send heartbeats)
-```
+Client-side failover
 
-+--------------------------------------------------------+
-|                        NameNode                        |
-|--------------------------------------------------------|
-| - Tracks files → chunks → DataNode locations           |
-| - Stores metadata in files.json & nodes.json           |
-| - Provides upload planning (chunk placement)           |
-| - Receives heartbeats from DataNodes                   |
-| - Simplified replica placement (round-robin)           |
-+--------------------------------------------------------+
-      ^                                      ^
-      |  (GET /files?path=...)               | (POST /heartbeat)
-      |                                      |
-      |                                      |
-+-------------------+               +-------------------+
-|     DataNode 1    |               |     DataNode 2    |
-|-------------------|               |-------------------|
-| - Stores chunks   |               | - Stores chunks   |
-| - Keeps index     |               | - Keeps index     |
-| - Serves chunks   |               | - Serves chunks   |
-| - Sends heartbeats|               | - Sends heartbeats|
-+-------------------+               +-------------------+
-      ^        ^                           ^       ^
-      |        |                           |       |
-      |    (HTTP PUT/GET chunks)           |       |
-      +------------------+-------------------+-----+
-                         |
-                 +----------------+
-                 |     Client     |
-                 |----------------|
-                 | Upload file    |
-                 | Download file  |
-                 | Retry replicas |
-                 +----------------+
+Persistent metadata and chunk indexes
 
-## How it works
+This project is designed for learning distributed systems, networking, and Go, while staying clean and minimal enough for others to run and contribute.
 
-1. Upload
-- Client splits file into chunks.
-- POST /files { path, num_chunks, replication } to NameNode.
-- NameNode creates chunk IDs and returns placement plan.
-- Client uploads each chunk to the assigned DataNodes.
+✨ Features
+✅ Core:
 
-2. Download
-- GET /files?path=... from NameNode to get chunk list and locations.
-- Client tries DataNodes in order until a chunk is fetched.
-- Reassemble chunks into the final file.
+Chunk-based file storage (default 4MB per chunk)
+
+Upload & download files with streaming (no full-buffer)
+
+Replication across multiple DataNodes
+
+Auto-registration of DataNodes with NameNode
+
+Heartbeats: DataNodes send chunk list + health every 5 seconds
+
+Client-side failover (if one DataNode is down, use replica)
+
+Persistent disk storage for NameNode and DataNode
+
+Clean JSON-based HTTP APIs
+
+🔧 Technologies:
+
+Go (no external dependencies beyond stdlib)
+
+HTTP-based protocol (easy debugging with curl)
+
+JSON metadata
+
+Goroutines for concurrency
+
+Locks & sync primitives for safety
+
+🧠 Architecture Overview
+
+DFS-Go consists of three main components:
+
+   +--------------------------------------------------------+
+   |                        NameNode                        |
+   |--------------------------------------------------------|
+   | - Tracks files → chunks → DataNode locations           |
+   | - Stores metadata in files.json & nodes.json           |
+   | - Provides upload planning (chunk placement)           |
+   | - Receives heartbeats from DataNodes                   |
+   | - Simplified replica placement (round-robin)           |
+   +--------------------------------------------------------+
+         ^                                      ^
+         |  (GET /files?path=...)               | (POST /heartbeat)
+         |                                      |
+         |                                      |
+   +-------------------+               +-------------------+
+   |     DataNode 1    |               |     DataNode 2    |
+   |-------------------|               |-------------------|
+   | - Stores chunks   |               | - Stores chunks   |
+   | - Keeps index     |               | - Keeps index     |
+   | - Serves chunks   |               | - Serves chunks   |
+   | - Sends heartbeats|               | - Sends heartbeats|
+   +-------------------+               +-------------------+
+         ^        ^                           ^       ^
+         |        |                           |       |
+         |    (HTTP PUT/GET chunks)           |       |
+         +------------------+-------------------+-----+
+                            |
+                    +----------------+
+                    |     Client     |
+                    |----------------|
+                    | Upload file    |
+                    | Download file  |
+                    | Retry replicas |
+                    +----------------+
+
+📦 How It Works
+1. Upload Flow
+
+Client reads local file & splits into chunks
+
+Client asks NameNode:
+POST /files { path, num_chunks, replication }
+
+NameNode:
+
+Creates chunk IDs
+
+Chooses DataNodes for replication
+
+Stores metadata
+
+Returns placement plan
+
+Client uploads each chunk to all assigned DataNodes
+
+DataNodes write chunk → update index → persist metadata
+
+2. Download Flow
+
+Client requests metadata from NameNode (GET /files?path=...)
+
+For each chunk:
+
+Try each DataNode in locations list
+
+Download from first healthy node
+
+Reassemble chunks into output file
+
+Verify integrity (optional: checksum match)
 
 3. Heartbeats
-- Each DataNode periodically POSTs inventory:
-  {
-     "id": "dn1",
-     "chunks": ["chunkA","chunkB"],
-     "capacity": 0
-  }
-- NameNode updates last-seen and cluster state.
 
-## Quickstart
+Every DataNode sends:
 
-Clone:
-```
+{
+  "id": "dn1",
+  "chunks": ["chunkA", "chunkB"],
+  "capacity": 0
+}
+
+
+NameNode updates:
+
+LastSeen timestamp
+
+Node’s chunk inventory
+
+Cluster health
+
+🚀 Quickstart
+1. Clone the repo
 git clone https://github.com/<your-username>/dfs-go
 cd dfs-go
-```
 
-Start NameNode:
-```
+2. Start NameNode
 go run ./cmd/namenode -addr=":8000" -meta-dir="./meta"
-```
 
-Start DataNodes (separate terminals):
-```
-# DataNode 1
+3. Start DataNodes
+
+Run each in separate terminals:
+
+DataNode 1:
 go run ./cmd/datanode \
   -id=dn1 \
   -addr=":9000" \
@@ -118,72 +165,104 @@ go run ./cmd/datanode \
   -namenode="http://localhost:8000" \
   -data-dir="./data1"
 
-# DataNode 2
+DataNode 2:
 go run ./cmd/datanode \
   -id=dn2 \
   -addr=":9001" \
   -self="http://localhost:9001" \
   -namenode="http://localhost:8000" \
   -data-dir="./data2"
-```
 
-Verify nodes:
-```
+
+Confirm cluster:
+
 curl http://localhost:8000/nodes
-```
 
-Upload:
-```
+4. Upload File
 go run ./cmd/client upload ./test/big.bin user/test/big.bin
-```
 
-Download:
-```
+5. Download File Back
 go run ./cmd/client download user/test/big.bin restored.bin
-```
 
-Verify integrity:
-```
+
+Verify:
+
 sha256sum ./test/big.bin restored.bin
-```
 
-## Directory layout
-```
+🛠 Directory Structure
 dfs-go/
   cmd/
-     namenode/
-     datanode/
-     client/
-  internal/      # packages (protocol, replication, etc.)
-  meta/           # NameNode metadata (files.json, nodes.json)
-  data1/ data2/   # DataNode storage
+    namenode/    # NameNode binary
+    datanode/    # DataNode binary
+    client/      # CLI for upload/download
+  internal/
+    (optional packages: protocol, replication, config)
+  meta/          # NameNode metadata (nodes.json, files.json)
+  data1/         # DataNode 1 chunks
+  data2/         # DataNode 2 chunks
   README.md
   go.mod
-```
 
-## Roadmap (planned)
-Short-term
-- Re-replication when a DataNode dies
-- Report under-replicated chunks
-- Optional checksum validation
-- File/dir deletion and CLI enhancements
+🛤 Roadmap (Future Updates)
 
-Medium-term
-- Smarter placement strategies
-- Background replication jobs
-- Configurable chunk size, HTTP/2 or gRPC transport
-- Simple web dashboard
+These are planned features for upcoming releases:
 
-Research
-- Content-addressing & deduplication
-- Multi-NameNode / consensus (Raft/Etcd)
-- Access control, caching strategies
+✅ Short-term
 
-## Contributing
-- Fork, create a feature branch, and submit a PR
-- Open issues for bugs or feature requests
+Re-replication when a DataNode dies
 
-## License
-MIT — free to use, modify, and distribute.
+Report “under-replicated” chunks in NameNode UI / API
 
-Feel free to open issues or PRs for improvements.
+Optional checksum validation during download
+
+File/dir deletion (with cascading chunk deletion)
+
+Improve client CLI (ls, rm, info commands)
+
+🚀 Medium-term
+
+Smarter chunk placement (load balancing, random, hash-based)
+
+Background replication job inside NameNode
+
+Configurable chunk size
+
+HTTP/2 or gRPC transport mode
+
+Simple web dashboard for cluster monitoring
+
+🧪 Advanced / Research
+
+Content addressing & deduplication
+
+Multi-NameNode (leader election)
+
+Raft or Etcd-backed metadata store
+
+Access control (users, permissions)
+
+Caching hot files on nearest DataNode
+
+🤝 Contributing
+
+Contributions are welcome!
+
+Fork the repo
+
+Create a feature branch
+
+Describe your changes clearly
+
+Submit a PR
+
+Please open issues for bugs or feature requests.
+
+📄 License
+
+This project is licensed under the MIT License.
+You are free to use, modify, distribute, and build on top of it.
+
+⭐️ Support the Project
+
+If you find this project useful or educational, consider giving it a star ⭐ on GitHub
+and share it with others who are learning distributed systems!
