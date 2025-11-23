@@ -39,40 +39,6 @@ Client <--> NameNode
 DataNodes (store & serve chunks, send heartbeats)
 ```
 
-+--------------------------------------------------------+
-|                        NameNode                        |
-|--------------------------------------------------------|
-| - Tracks files → chunks → DataNode locations           |
-| - Stores metadata in files.json & nodes.json           |
-| - Provides upload planning (chunk placement)           |
-| - Receives heartbeats from DataNodes                   |
-| - Simplified replica placement (round-robin)           |
-+--------------------------------------------------------+
-      ^                                      ^
-      |  (GET /files?path=...)               | (POST /heartbeat)
-      |                                      |
-      |                                      |
-+-------------------+               +-------------------+
-|     DataNode 1    |               |     DataNode 2    |
-|-------------------|               |-------------------|
-| - Stores chunks   |               | - Stores chunks   |
-| - Keeps index     |               | - Keeps index     |
-| - Serves chunks   |               | - Serves chunks   |
-| - Sends heartbeats|               | - Sends heartbeats|
-+-------------------+               +-------------------+
-      ^        ^                           ^       ^
-      |        |                           |       |
-      |    (HTTP PUT/GET chunks)           |       |
-      +------------------+-------------------+-----+
-                         |
-                 +----------------+
-                 |     Client     |
-                 |----------------|
-                 | Upload file    |
-                 | Download file  |
-                 | Retry replicas |
-                 +----------------+
-
 ## How it works
 
 1. Upload
@@ -187,3 +153,4 @@ Research
 MIT — free to use, modify, and distribute.
 
 Feel free to open issues or PRs for improvements.
+
