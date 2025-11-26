@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -55,6 +56,12 @@ type DataNode struct {
 	index map[string]IndexEntry
 	cfg Config
 }
+
+type replicateRequest struct {
+    ChunkID string `json:"chunk_id"`
+    Source  string `json:"source"` // base URL, e.g. http://localhost:9001
+}
+
 
 // similar to construtor class in java
 func NewDataNode(cfg Config) *DataNode {
@@ -126,68 +133,11 @@ func (dn *DataNode) putChunkHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing chunk ID", http.StatusBadRequest)
 		return
 	}
-	// creating a file path
-	tmpPath := filepath.Join(dn.cfg.DataDir, chunkID+".tmp")
-	finalPath := filepath.Join(dn.cfg.DataDir, chunkID)
-
-	// create temp file and stream into it
-	tmpF, err := os.Create(tmpPath)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		log.Printf("create tmp file error: %v", err)
-		return
-	}
-	//copying data
-	n, err := io.Copy(tmpF, r.Body)
-	if err != nil {
-		tmpF.Close()
-		os.Remove(tmpPath)
-		http.Error(w, "copy error", http.StatusInternalServerError)
-		log.Printf("copy error: %v", err)
-		return
-	}
-	tmpF.Close()
-	// atomically move into final location
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		http.Error(w, "rename error", http.StatusInternalServerError)
-		log.Printf("rename error: %v", err)
-		return
-	}
-	
-	// compute sha256
-	hasher := sha256.New()
-	f, err := os.Open(finalPath)
-	if err != nil {
+	err := dn.storeChunk(chunkID,r.Body)
+	if err !=nil{
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
-	if _, err := io.Copy(hasher, f); err != nil {
-		f.Close()
-		os.Remove(finalPath)
-		http.Error(w, "hash error", http.StatusInternalServerError)
-		log.Printf("hash error: %v", err)
-		return
-	}
-	f.Close()
-	hashInBytes := hasher.Sum(nil)
-	hash := fmt.Sprintf("%x", hashInBytes)
-
-
-	// update index
-	dn.mu.Lock()
-	dn.index[chunkID] = IndexEntry{
-		Size:    n,
-		Created: time.Now().Unix(),
-		CheckSum: hash,
-	}
-	dn.mu.Unlock() // This was the missing unlock from our previous discussion
-
-	// goroutine persist index asynchronously (fire and forgot)
-	go dn.saveIndex()
-
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, "stored %s (%d bytes)\n", chunkID, n)
-	log.Printf("stored chunk %s (%d bytes)\n", chunkID, n)
 }
 
 // getting each chunk
@@ -240,6 +190,51 @@ func (dn *DataNode) listHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(dn.index); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+func (dn *DataNode) replicateHandler(w http.ResponseWriter, r *http.Request) {
+	  if r.Method != http.MethodPost {
+        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var req replicateRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+    if req.ChunkID == "" || req.Source == "" {
+        http.Error(w, "missing fields", http.StatusBadRequest)
+        return
+    }
+
+	// build source url
+	src := strings.TrimRight(req.Source,"/")
+	url := fmt.Sprintf("%s/chunks/%s",src,req.ChunkID)
+	resp, err := http.Get(url)
+    if err != nil {
+        log.Printf("replicate: fetch from %s failed: %v", url, err)
+        http.Error(w, "fetch failed", http.StatusBadGateway)
+        return
+    }
+    defer resp.Body.Close()
+
+	 if resp.StatusCode != http.StatusOK {
+        b, _ := io.ReadAll(resp.Body)
+        log.Printf("replicate: source returned %d: %s", resp.StatusCode, string(b))
+        http.Error(w, "source error", http.StatusBadGateway)
+        return
+    }
+	if err := dn.storeChunk(req.ChunkID,resp.Body); err!= nil{
+		log.Printf("replicate: storeChunk failed: %v", err)
+        http.Error(w, "store failed", http.StatusInternalServerError)
+        return
+	}
+	  w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]any{
+        "ok":       true,
+        "chunk_id": req.ChunkID,
+    })
 }
 
 // heartbeatLoop (placeholder) logs status; later will Post to NameNode
@@ -332,6 +327,71 @@ func (dn *DataNode) registerWithNameNode() {
     log.Printf("registered with NameNode as %s (%s)\n", dn.cfg.NodeID, dn.cfg.ListenAddr)
 }
 
+func (dn *DataNode) storeChunk(chunkID string,r io.Reader) error {
+		// creating a file path
+	tmpPath := filepath.Join(dn.cfg.DataDir, chunkID+".tmp")
+	finalPath := filepath.Join(dn.cfg.DataDir, chunkID)
+
+	// create temp file and stream into it
+	tmpF, err := os.Create(tmpPath)
+	if err != nil {
+
+		log.Printf("create tmp file error: %v", err)
+		return err
+	}
+	//copying data
+	n, err := io.Copy(tmpF, r)
+	if err != nil {
+		tmpF.Close()
+		os.Remove(tmpPath)
+		log.Printf("copy error: %v", err)
+		return err
+	}
+	tmpF.Close()
+	// atomically move into final location
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+
+		log.Printf("rename error: %v", err)
+		return err
+	}
+	
+	// compute sha256
+	hasher := sha256.New()
+	f, err := os.Open(finalPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(hasher, f); err != nil {
+		f.Close()
+		os.Remove(finalPath)
+		log.Printf("hash error: %v", err)
+		return err
+	}
+	f.Close()
+	hashInBytes := hasher.Sum(nil)
+	hash := fmt.Sprintf("%x", hashInBytes)
+
+
+	// update index
+	dn.mu.Lock()
+	dn.index[chunkID] = IndexEntry{
+		Size:    n,
+		Created: time.Now().Unix(),
+		CheckSum: hash,
+	}
+	dn.mu.Unlock() // This was the missing unlock from our previous discussion
+
+	// goroutine persist index asynchronously (fire and forgot)
+	go dn.saveIndex()
+
+	
+	log.Printf("stored chunk %s (%d bytes)\n", chunkID, n)
+	return nil
+}
+
+
+
 
 func main() {
 	 cfg := loadConfig()
@@ -361,6 +421,7 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/list", dn.listHandler)
+	mux.HandleFunc("/internal/replicate", dn.replicateHandler)
 	// context for heartbeat and graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	go dn.heartbeatLoop(ctx)

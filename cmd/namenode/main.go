@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +54,7 @@ type ChunkPlacement struct {
 type FileMeta struct {
 	Path   string           `json:"path"`
 	Chunks []ChunkPlacement `json:"chunks"`
+	Replication int 		`json:"replication"`
 }
 
 // NameNode
@@ -63,6 +66,15 @@ type NameNode struct {
 	rrIdx int
 	cfg Config
 }
+
+type UnderReplicatedChunk struct {
+    FilePath  string   `json:"file_path"`
+    ChunkID   string   `json:"chunk_id"`
+    Want      int      `json:"want"`
+    Have      int      `json:"have"`
+    Locations []string `json:"locations"` // current healthy locations
+}
+
 
 func NewNameNode(cfg Config) *NameNode{
 	return &NameNode{
@@ -211,7 +223,11 @@ func (nn *NameNode) createFileHandler(w http.ResponseWriter,r *http.Request){
 			nn.mu.RUnlock()
 		placements = append(placements, ChunkPlacement{ID: chunkID, Locations: locs})	
 	}
-	meta := &FileMeta{Path: req.Path, Chunks: placements}
+	meta := &FileMeta{
+		Path: req.Path,
+		 Chunks: placements,
+		 Replication: req.Replication, // store desiredreplication factor
+		}
 	nn.mu.Lock()
 	nn.files[req.Path] = meta
 	nn.mu.Unlock()
@@ -240,6 +256,31 @@ func (nn *NameNode) listNodesHandler(w http.ResponseWriter, r *http.Request) {
     if err := json.NewEncoder(w).Encode(nn.nodes); err != nil {
         http.Error(w, "internal error", http.StatusInternalServerError)
     }
+}
+
+// underReplication
+func (nn *NameNode) underReplicatedHandler(w http.ResponseWriter, r *http.Request) {
+    // e.g. consider nodes dead if no heartbeat in last 15 seconds
+    const timeout = 15 * time.Second
+
+    chunks := nn.findUnderReplicated(timeout)
+
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(chunks); err != nil {
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+}
+
+func (nn *NameNode) healHandler(w http.ResponseWriter,r *http.Request){
+	if r.Method != http.MethodPost{
+		   http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        return
+	}
+	const timeout = 15 * time.Second
+    healed := nn.healUnderReplicated(timeout)
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(healed)
 }
 
 
@@ -287,6 +328,230 @@ func (nn *NameNode) loadState() {
 }
 
 
+
+func (nn *NameNode) findUnderReplicated(timeout time.Duration) []UnderReplicatedChunk{
+
+	nn.mu.RLock()
+	defer nn.mu.RUnlock()
+	// // 1) determine healthy nodes (recent heartbeat)
+	// healthyNodes := make(map[string]*DataNodeInfo) 
+	// for id,n := range nn.nodes{
+	// 	if now - n.LastSeen<=int64(timeout.Seconds()){
+	// 		healthyNodes[id]=n
+	// 	}
+	// }
+
+	// // 2) build chunkId -> []nodeId map from healthy nodes
+	// chunkToNodes := make(map[string][]string)
+	// for id,n := range healthyNodes{
+	// 	for _,cid := range n.Chunks{
+	// 		chunkToNodes[cid] = append(chunkToNodes[cid], id)
+	// 	}
+	// }
+
+	healthyNodes, chunkToNodes := nn.buildClusterView(timeout)
+
+
+	var result []UnderReplicatedChunk
+	for path,meta := range nn.files{
+		// desired replication: from meta, or fallback if old data
+		desired := meta.Replication
+		  if desired <= 0 {
+            if len(meta.Chunks) > 0 {
+                desired = len(meta.Chunks[0].Locations)
+            } else {
+                desired = 1
+            }
+        }
+		for _,ch := range meta.Chunks{
+			nodeIDs := chunkToNodes[ch.ID]
+			 have := len(nodeIDs)
+			 if have >= desired{
+				 continue	//fully replicated or over replicated
+			 }
+			   // convert nodeIDs -> addresses for debug
+            locs := make([]string, 0, len(nodeIDs))
+            for _, nid := range nodeIDs {
+                if n, ok := healthyNodes[nid]; ok {
+                    locs = append(locs, n.Addr)
+                }
+            }
+			  result = append(result, UnderReplicatedChunk{
+                FilePath:  path,
+                ChunkID:   ch.ID,
+                Want:      desired,
+                Have:      have,
+                Locations: locs,
+            })
+		}
+	}
+	return result
+}
+
+// returns: healthyNodes, chunkID -> []nodeID
+func (nn *NameNode) buildClusterView(timeout time.Duration) (map[string]*DataNodeInfo, map[string][]string) {
+    now := time.Now().Unix()
+
+    healthy := make(map[string]*DataNodeInfo)
+    chunkToNodes := make(map[string][]string)
+
+    for id, n := range nn.nodes {
+        if now-n.LastSeen <= int64(timeout.Seconds()) {
+            healthy[id] = n
+        }
+    }
+    for id, n := range healthy {
+        for _, cid := range n.Chunks {
+            chunkToNodes[cid] = append(chunkToNodes[cid], id)
+        }
+    }
+    return healthy, chunkToNodes
+}
+
+func (nn *NameNode) healUnderReplicated(timeout time.Duration) []UnderReplicatedChunk{
+	under := nn.findUnderReplicated(timeout)
+	if len(under)==0{
+		return nil
+	}
+	healthy,chunkToNodes := nn.buildClusterView(timeout)
+	// Build nodeID -> *DataNodeInfo map already in `healthy`
+    // Also build quick lookup: chunkID -> set of nodeIDs that have it
+    // chunkToNodes already gives that.
+
+	for _,ur := range under{
+		nn.mu.Lock()
+		meta,ok := nn.files[ur.FilePath]
+		if !ok{
+			nn.mu.Unlock()
+			continue
+		}
+		// find chunk in meta
+		var chunkIdx int = -1
+		for i,ch := range meta.Chunks{
+			if ch.ID == ur.ChunkID{
+				chunkIdx = i
+				break
+			}
+		}
+		if chunkIdx == -1 {
+            nn.mu.Unlock()
+            continue
+        }
+		  // pick a source node (one that currently has this chunk)
+        nodeIDsWithChunk := chunkToNodes[ur.ChunkID]
+        if len(nodeIDsWithChunk) == 0 {
+            nn.mu.Unlock()
+            log.Printf("heal: no source nodes for chunk %s\n", ur.ChunkID)
+            continue
+        }
+        srcID := nodeIDsWithChunk[0]
+        srcNode, ok := healthy[srcID]
+        if !ok {
+            nn.mu.Unlock()
+            continue
+        }
+        sourceAddr := srcNode.Addr
+
+		// pick a target node : healthy node that does not have this chunk
+		var target *DataNodeInfo
+        for id, n := range healthy {
+            // skip nodes that already have chunk
+            has := false
+            for _, cid := range chunkToNodes[ur.ChunkID] {
+                if cidNodeID := cid; cidNodeID == id {
+                    has = true
+                    break
+                }
+            }
+            if has {
+                continue
+            }
+            target = n
+            break
+        }
+
+        if target == nil {
+            nn.mu.Unlock()
+            log.Printf("heal: no target node available for chunk %s\n", ur.ChunkID)
+            continue
+        }
+
+        targetAddr := target.Addr
+        chunkID := ur.ChunkID
+        filePath := ur.FilePath
+
+        nn.mu.Unlock()
+
+        // Call target datanode to replicate
+        log.Printf("heal: replicating chunk %s of %s from %s to %s\n",
+            chunkID, filePath, sourceAddr, targetAddr)
+
+        body := map[string]string{
+            "chunk_id": chunkID,
+            "source":   sourceAddr,
+        }
+        buf := &bytes.Buffer{}
+        if err := json.NewEncoder(buf).Encode(body); err != nil {
+            log.Printf("heal: encode error: %v", err)
+            continue
+        }
+
+        resp, err := http.Post(strings.TrimRight(targetAddr, "/")+"/internal/replicate",
+            "application/json", buf)
+        if err != nil {
+            log.Printf("heal: replicate request failed: %v", err)
+            continue
+        }
+        resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("heal: target returned %d for chunk %s\n", resp.StatusCode, chunkID)
+            continue
+        }
+
+        // Update metadata: add targetAddr to chunk locations if not already there
+        nn.mu.Lock()
+        meta, ok = nn.files[filePath]
+        if ok {
+            ch := &meta.Chunks[chunkIdx]
+            found := false
+            for _, loc := range ch.Locations {
+                if loc == targetAddr {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                ch.Locations = append(ch.Locations, targetAddr)
+            }
+        }
+        nn.mu.Unlock()
+        nn.persistFiles()
+    }
+
+    return under
+
+	}
+
+func (nn *NameNode) startAutoHeal() {
+    const interval = 10 * time.Second
+    const timeout = 15 * time.Second
+
+    go func() {
+        for {
+            time.Sleep(interval)
+
+            // Find & Fix under-replication
+            ur := nn.healUnderReplicated(timeout)
+            if len(ur) > 0 {
+                log.Printf("AutoHeal: healed %d chunks\n", len(ur))
+            }
+        }
+    }()
+}
+
+
+
+
 func main() {
 	cfg := loadConfig()
 	 if err := os.MkdirAll(cfg.MetaDir, 0755); err != nil {
@@ -294,6 +559,7 @@ func main() {
     }
 	nn := NewNameNode(cfg)
 	nn.loadState()
+	nn.startAutoHeal()
 	http.HandleFunc("/register", nn.registerHandler)   // POST
 	http.HandleFunc("/heartbeat", nn.heartbeatHandler) // POST
 	http.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) {
@@ -306,7 +572,9 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	http.HandleFunc("/under_replicated", nn.underReplicatedHandler)
 	http.HandleFunc("/nodes", nn.listNodesHandler)
+	http.HandleFunc("/heal", nn.healHandler)
 	log.Printf("NameNode listening on %s\n", nn.cfg.ListenAddr)
 	if err := http.ListenAndServe(nn.cfg.ListenAddr, nil); err != nil {
 		log.Fatal(err)

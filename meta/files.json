@@ -1,0 +1,88 @@
+{
+  "user/test/big40.bin": {
+    "path": "user/test/big40.bin",
+    "chunks": [
+      {
+        "id": "aa4d59c0-9260-467f-b96c-89b7dde08294",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "67d667db-f36d-463c-8a0f-b3ab6590a987",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "34fe526a-8b43-4b79-b531-55d2276b7811",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "58ff698d-c69d-4339-9693-15e491bfdd89",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "f56a3d29-90d2-4331-9cb5-de2202f4b478",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "d8a974f2-88ca-4109-9822-58ba47b51f77",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "d384aa6d-d003-4951-b725-8567aff189e1",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "0ed736c8-eb6e-411e-85bf-01a9c9cfa45c",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "542291ab-048f-4a75-a10e-af285905180a",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      },
+      {
+        "id": "95ec549f-ead1-40a5-99ac-78deb819d5c1",
+        "locations": [
+          "http://localhost:9000",
+          "http://localhost:9001",
+          "http://localhost:9003"
+        ]
+      }
+    ],
+    "replication": 2
+  }
+}
